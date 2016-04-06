@@ -279,12 +279,13 @@ func (c *Cors) handlePreflight(w http.ResponseWriter, r *http.Request) {
 	headers.Set("Access-Control-Allow-Origin", origin)
 	// Spec says: Since the list of methods can be unbounded, simply returning the method indicated
 	// by Access-Control-Request-Method (if supported) can be enough
-	headers.Set("Access-Control-Allow-Methods", strings.ToUpper(reqMethod))
-	if len(reqHeaders) > 0 {
-
+	headers.Set("Access-Control-Allow-Methods", strings.Join(c.allowedMethods, ", "))
+	if c.allowedHeadersAll {
 		// Spec says: Since the list of headers can be unbounded, simply returning supported headers
 		// from Access-Control-Request-Headers can be enough
 		headers.Set("Access-Control-Allow-Headers", strings.Join(reqHeaders, ", "))
+	} else if len(c.allowedHeaders) > 0 {
+		headers.Set("Access-Control-Allow-Headers", strings.Join(c.allowedHeaders, ", "))
 	}
 	if c.allowCredentials {
 		headers.Set("Access-Control-Allow-Credentials", "true")
