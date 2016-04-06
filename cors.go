@@ -74,23 +74,77 @@ type Cors struct {
 	Log *log.Logger
 	// Set to true when allowed origins contains a "*"
 	allowedOriginsAll bool
-	// Normalized list of plain allowed origins
-	allowedOrigins []string
+	// Normalized set of plain allowed origins
+	allowedOrigins *stringSet
 	// List of allowed origins containing wildcards
 	allowedWOrigins []wildcard
 	// Optional origin validator function
 	allowOriginFunc func(origin string) bool
 	// Set to true when allowed headers contains a "*"
 	allowedHeadersAll bool
-	// Normalized list of allowed headers
-	allowedHeaders []string
+	// Normalized set of allowed headers
+	allowedHeaders *stringSet
 	// Normalized list of allowed methods
-	allowedMethods []string
+	allowedMethods *stringSet
 	// Normalized list of exposed headers
 	exposedHeaders    []string
 	allowCredentials  bool
 	maxAge            int
 	optionPassthrough bool
+}
+
+type stringSet struct {
+	values map[string]bool
+	list   string
+}
+
+func newStringSet(s []string) *stringSet {
+	ss := &stringSet{
+		values: map[string]bool{},
+		list:   strings.Join(s, ", "),
+	}
+	for _, v := range s {
+		ss.values[v] = true
+	}
+	return ss
+}
+
+func (ss *stringSet) add(s string) *stringSet {
+	if ss == nil {
+		return newStringSet([]string{s})
+	}
+	if ss.contains(s) {
+		return ss
+	}
+	ss.values[s] = true
+	if len(ss.list) > 0 {
+		ss.list = ss.list + ", " + s
+	} else {
+		ss.list = s
+	}
+	return ss
+}
+
+func (ss *stringSet) contains(s string) bool {
+	if ss == nil {
+		return false
+	}
+	_, ok := ss.values[s]
+	return ok
+}
+
+func (ss *stringSet) len() int {
+	if ss == nil {
+		return 0
+	}
+	return len(ss.values)
+}
+
+func (ss *stringSet) asList() string {
+	if ss == nil {
+		return ""
+	}
+	return ss.list
 }
 
 // New creates a new Cors handler with the provided options.
@@ -115,7 +169,7 @@ func New(options Options) *Cors {
 		// Default is all origins
 		c.allowedOriginsAll = true
 	} else {
-		c.allowedOrigins = []string{}
+		c.allowedOrigins = nil
 		c.allowedWOrigins = []wildcard{}
 		for _, origin := range options.AllowedOrigins {
 			// Normalize
@@ -131,7 +185,7 @@ func New(options Options) *Cors {
 				w := wildcard{origin[0:i], origin[i+1 : len(origin)]}
 				c.allowedWOrigins = append(c.allowedWOrigins, w)
 			} else {
-				c.allowedOrigins = append(c.allowedOrigins, origin)
+				c.allowedOrigins = c.allowedOrigins.add(origin)
 			}
 		}
 	}
@@ -139,10 +193,9 @@ func New(options Options) *Cors {
 	// Allowed Headers
 	if len(options.AllowedHeaders) == 0 {
 		// Use sensible defaults
-		c.allowedHeaders = []string{"Origin", "Accept", "Content-Type"}
+		c.allowedHeaders = newStringSet([]string{"Origin", "Accept", "Content-Type"})
 	} else {
-		// Origin is always appended as some browsers will always request for this header at preflight
-		c.allowedHeaders = convert(append(options.AllowedHeaders, "Origin"), http.CanonicalHeaderKey)
+		c.allowedHeaders = newStringSet(convert(options.AllowedHeaders, http.CanonicalHeaderKey))
 		for _, h := range options.AllowedHeaders {
 			if h == "*" {
 				c.allowedHeadersAll = true
@@ -150,14 +203,18 @@ func New(options Options) *Cors {
 				break
 			}
 		}
+		if c.allowedHeaders.len() > 0 {
+			// Origin is always appended as some browsers will always request for this header at preflight
+			c.allowedHeaders = c.allowedHeaders.add("Origin")
+		}
 	}
 
 	// Allowed Methods
 	if len(options.AllowedMethods) == 0 {
 		// Default is spec's "simple" methods
-		c.allowedMethods = []string{"GET", "POST"}
+		c.allowedMethods = newStringSet([]string{"GET", "POST"})
 	} else {
-		c.allowedMethods = convert(options.AllowedMethods, strings.ToUpper)
+		c.allowedMethods = newStringSet(convert(options.AllowedMethods, strings.ToUpper))
 	}
 
 	return c
@@ -279,13 +336,13 @@ func (c *Cors) handlePreflight(w http.ResponseWriter, r *http.Request) {
 	headers.Set("Access-Control-Allow-Origin", origin)
 	// Spec says: Since the list of methods can be unbounded, simply returning the method indicated
 	// by Access-Control-Request-Method (if supported) can be enough
-	headers.Set("Access-Control-Allow-Methods", strings.Join(c.allowedMethods, ", "))
+	headers.Set("Access-Control-Allow-Methods", c.allowedMethods.asList())
 	if c.allowedHeadersAll {
 		// Spec says: Since the list of headers can be unbounded, simply returning supported headers
 		// from Access-Control-Request-Headers can be enough
 		headers.Set("Access-Control-Allow-Headers", strings.Join(reqHeaders, ", "))
-	} else if len(c.allowedHeaders) > 0 {
-		headers.Set("Access-Control-Allow-Headers", strings.Join(c.allowedHeaders, ", "))
+	} else if c.allowedHeaders.len() > 0 {
+		headers.Set("Access-Control-Allow-Headers", c.allowedHeaders.asList())
 	}
 	if c.allowCredentials {
 		headers.Set("Access-Control-Allow-Credentials", "true")
@@ -352,10 +409,8 @@ func (c *Cors) isOriginAllowed(origin string) bool {
 		return true
 	}
 	origin = strings.ToLower(origin)
-	for _, o := range c.allowedOrigins {
-		if o == origin {
-			return true
-		}
+	if c.allowedOrigins.contains(origin) {
+		return true
 	}
 	for _, w := range c.allowedWOrigins {
 		if w.match(origin) {
@@ -368,7 +423,7 @@ func (c *Cors) isOriginAllowed(origin string) bool {
 // isMethodAllowed checks if a given method can be used as part of a cross-domain request
 // on the endpoing
 func (c *Cors) isMethodAllowed(method string) bool {
-	if len(c.allowedMethods) == 0 {
+	if c.allowedMethods.len() == 0 {
 		// If no method allowed, always return false, even for preflight request
 		return false
 	}
@@ -377,10 +432,8 @@ func (c *Cors) isMethodAllowed(method string) bool {
 		// Always allow preflight requests
 		return true
 	}
-	for _, m := range c.allowedMethods {
-		if m == method {
-			return true
-		}
+	if c.allowedMethods.contains(method) {
+		return true
 	}
 	return false
 }
@@ -393,13 +446,7 @@ func (c *Cors) areHeadersAllowed(requestedHeaders []string) bool {
 	}
 	for _, header := range requestedHeaders {
 		header = http.CanonicalHeaderKey(header)
-		found := false
-		for _, h := range c.allowedHeaders {
-			if h == header {
-				found = true
-			}
-		}
-		if !found {
+		if !c.allowedHeaders.contains(header) {
 			return false
 		}
 	}
